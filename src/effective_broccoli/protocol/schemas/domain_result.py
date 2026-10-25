@@ -1,4 +1,3 @@
-import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -13,4 +12,4 @@ class ResultState(str, Enum):
 @dataclass
 class DomainResult:
     state: ResultState
-    winner: Optional[uuid.UUID] = None
+    winner: Optional[str] = None

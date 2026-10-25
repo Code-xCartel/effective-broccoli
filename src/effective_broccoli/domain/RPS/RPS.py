@@ -1,5 +1,5 @@
 import uuid
-from typing import Dict, List, Tuple
+from typing import Dict, List, Union
 
 from effective_broccoli.domain.abstract import AbstractDomain
 from effective_broccoli.protocol.schemas.abstract import AbstractAction
@@ -16,15 +16,15 @@ WINS = {
 class RPS(AbstractDomain):
     def __init__(self) -> None:
         self.round: int = 1
-        self.move_set: Dict[uuid.UUID, RPSAction] = {}
-        self.summary: List[Dict[int, Dict[uuid.UUID, RPSAction]]] = []
+        self.move_set: Dict[str, RPSAction] = {}
+        self.summary: List[Dict[int, Dict[str, RPSAction]]] = []
 
     def play_move(self, player: uuid.UUID, move: AbstractAction) -> None:
         if not isinstance(move, RPSAction):
             raise RuntimeError("Invalid Action Provided For Domain RPS")
-        if player in self.move_set:
+        if str(player) in self.move_set:
             raise RuntimeError(f"Player {player} Already Played")
-        self.move_set[player] = move
+        self.move_set[str(player)] = move
 
     def validate(self) -> DomainResult:
         if len(self.move_set) != 2:
@@ -51,5 +51,7 @@ class RPS(AbstractDomain):
         self.move_set = {}
         self.summary = []
 
-    def get_summary(self) -> Tuple[int, List[Dict[int, Dict[uuid.UUID, RPSAction]]]]:
-        return self.round, self.summary
+    def get_summary(
+        self,
+    ) -> Dict[str, Union[int, List[Dict[int, Dict[str, RPSAction]]]]]:
+        return {"round": self.round, "summary": self.summary}
