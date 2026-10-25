@@ -1,47 +1,95 @@
-import secrets
-from types import SimpleNamespace
-from typing import Dict, Optional, Set, Tuple
+from typing import Literal, Set
 
-from websockets import ServerConnection
+from websockets import ServerConnection, broadcast
 
+from effective_broccoli.domain.abstract import AbstractDomain
+from effective_broccoli.engine.scheduler import Scheduler
 from effective_broccoli.protocol.event import Event
 from effective_broccoli.protocol.message import Message
+from effective_broccoli.protocol.schemas.abstract import AbstractAction
+from effective_broccoli.protocol.schemas.domain_result import ResultState
+from effective_broccoli.server.states import SessionStateMachine
+
+MAX_ENTITIES_PER_SESSION = 2
 
 
 class Session:
-    def __init__(self):
-        self.sessions: Dict[str, Tuple[SimpleNamespace, Set[ServerConnection]]] = {}
+    def __init__(
+        self, host: ServerConnection, join_key: str, domain: AbstractDomain
+    ) -> None:
+        self.join_key = join_key
+        self.host = host
+        self.connections: Set[ServerConnection] = set()
+        self.scheduler = Scheduler(domain=domain)
+        self.state: SessionStateMachine = SessionStateMachine.LOBBY
 
-    async def create(self, websocket: ServerConnection):
-        join_key = secrets.token_urlsafe(6)
-        game = SimpleNamespace()
-        self.sessions[join_key] = game, {websocket}
-        await websocket.send(
-            Message(Event.KEY, join_key=join_key, description="Session Created.").dump
+    def add(self, session: ServerConnection) -> None:
+        if len(self.connections) >= MAX_ENTITIES_PER_SESSION:
+            raise RuntimeError(f"Only {MAX_ENTITIES_PER_SESSION} Players Are Allowed.")
+        self.connections.add(session)
+
+    async def start(self, websocket: ServerConnection) -> None:
+        if self.host.id != websocket.id:
+            raise RuntimeError("Only Host Can Start Session.")
+        if len(self.connections) < MAX_ENTITIES_PER_SESSION:
+            raise RuntimeError("Cannot Start Incomplete Session.")
+        broadcast(
+            self.connections,
+            Message(Event.INFO, description="Session Started.").dump,
         )
-        return
-
-    async def join(self, websocket: ServerConnection, join_key: Optional[str]):
-        if not join_key:
-            await websocket.send(
-                Message(Event.ERROR, description="Join Key Required").dump
-            )
-            return
-        try:
-            game, join = self.sessions[join_key]
-        except KeyError:
-            raise Exception(f"No Session For {join_key}")
-
-        if len(join) >= 2:
-            await websocket.send(Message(Event.ERROR, description="Session Full.").dump)
-            return
-
-        host = next(iter(join))
-        join.add(websocket)
-        await websocket.send(
-            Message(Event.JOIN, description=f"Session Joined, Host: {host.id}").dump
+        self.state = SessionStateMachine.IN_SESSION
+        self.scheduler.initialize([conn.id for conn in self.connections])
+        broadcast(
+            self.connections,
+            Message(
+                Event.TURN, payload={"detail": self.scheduler.current_state_entity}
+            ).dump,
         )
-        await host.send(
-            Message(Event.JOIN, description=f"{websocket.id} Joined Your Session").dump
+
+    async def perform_action(
+        self, websocket: ServerConnection, action: AbstractAction
+    ) -> None:
+        if self.state != SessionStateMachine.IN_SESSION:
+            raise RuntimeError("Session State Is Invalid.")
+        action_result = self.scheduler.action(websocket.id, action)
+
+        match action_result.state:
+            case ResultState.INCOMPLETE:
+                broadcast(
+                    self.connections,
+                    Message(
+                        Event.TURN,
+                        payload={"detail": self.scheduler.current_state_entity},
+                    ).dump,
+                )
+            case ResultState.WINNER:
+                self.state = SessionStateMachine.ENDED
+                broadcast(
+                    self.connections,
+                    Message(Event.END, description=f"{action_result.winner} Won.").dump,
+                )
+            case ResultState.DRAW:
+                self.state = SessionStateMachine.ENDED
+                broadcast(
+                    self.connections, Message(Event.END, description="Its A Draw.").dump
+                )
+
+    async def update(
+        self, websocket: ServerConnection, action: Literal["advance", "reset"]
+    ) -> None:
+        if self.state != SessionStateMachine.ENDED:
+            raise RuntimeError("Session State Is Invalid.")
+        if self.host.id != websocket.id:
+            raise RuntimeError("Only Host Can Start Session.")
+        self.state = SessionStateMachine.IN_SESSION
+        self.scheduler.update_domain(action)
+        broadcast(
+            self.connections,
+            Message(Event.INFO, payload=self.scheduler.get_domain_info()).dump,
         )
-        return
+        broadcast(
+            self.connections,
+            Message(
+                Event.TURN, payload={"detail": self.scheduler.current_state_entity}
+            ).dump,
+        )
